@@ -5,6 +5,8 @@ import Numeric (showHex)
 import Data.Either
 import Data.List
 import Data.HashMap.Lazy (HashMap)
+import qualified Data.HashMap.Lazy as HM
+import System.Random
 
 import While
 
@@ -61,55 +63,75 @@ instance Show Branch where
   show BEQ = "\tbeq"
   show BRA = "\tbra"
 
-data Directive = DDs Size String Integer -- naziv labela i velicina
-               -- | DDc Size String [Integer]
-               | DOrg Integer
-               | DLabel String
-               | DEnd String
-               deriving (Eq)
+  -- kod dijelim na instrukcije i direktive
+data Code = -- instrukcije
+            IMove Size Addr Addr
+          | IAdd Size Addr Addr
+          | ISub Size Addr Addr
+          | IDiv Size Addr Addr
+          | IMul Size Addr Addr
+          | IJmp Addr
+          | ICmp Size Addr Addr
+        -- u ovom slucaju adresa je label ili offset (assembly brine za to)
+          | IBcc Branch Addr
+          | IJsr Addr
+          | INeg Size Addr
+          | IAnd Size Addr Addr
+          | IOr Size Addr Addr
+          | ITrap Integer -- trap kod! -- za ispis, izlaz, unos itd.
+          | ITst Size Addr
+        -- | IMovem [Addr] [Addr] -- za context switch!
 
-instance Show Directive where
-  -- TODO: kod ovih stringova provjeravati da nemaju razmake!
-  show (DDs sz str i) = str ++ " " ++ "ds" ++ show sz ++ " " ++ show i ++ "\n"
-  -- show (DDc str i) = str ++ " " ++ "ds" ++ show sz ++ show i
-  show (DOrg addr) = "\torg $" ++ showHex addr "" ++ "\n"
-  show (DLabel str) = str ++ ":\n"
-  show (DEnd str) = "\tend " ++ str ++ "\n"
+          -- direktive
+          | DDs Size String Integer -- naziv labela i velicina
+          | DOrg Integer
+          | DLabel String
+          | DEnd String
+          deriving (Eq)
 
-data Instruction = IMove Size Addr Addr
-                 | IAdd Size Addr Addr
-                 | ISub Size Addr Addr
-                 | IDiv Size Addr Addr
-                 | IMul Size Addr Addr
-                 | IJmp Addr
-                 | ICmp Size Addr Addr
-                -- u ovom slucaju adresa je label ili offset (assembly brine za to)
-                 | IBcc Branch Addr
-                 | ITrap Integer -- trap kod! -- za ispis, izlaz, unos itd.
-                -- | INot Addr -- TODO: tu adresa mora biti registar ili memorija pa ne diram sad
-                -- | IMovem [Addr] [Addr] -- za context switch!
-                deriving (Eq)
-
-instance Show Instruction where
+instance Show Code where
   -- TODO: ovo se moze ljepse s case-om
+  -- TODO: ovo nije dovoljno za immediate i quick varijante
   show (IMove sz ad1 ad2) = "\tmove" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
   show (IAdd sz ad1 ad2) = "\tadd" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
   show (ISub sz ad1 ad2) = "\tsub" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
   show (IMul sz ad1 ad2) = "\tmulu" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
   show (IDiv sz ad1 ad2) = "\tdivu" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
   show (ICmp sz ad1 ad2) = "\tcmp" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
+  show (ITst sz ad) = "\ttst" ++ show sz ++ " " ++ show ad ++ "\n"
+
+  show (INeg sz ad) = "\tneg" ++ show sz ++ " " ++ show ad ++ "\n"
+  show (IAnd sz ad1 ad2) = "\tand" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
+  show (IOr sz ad1 ad2) = "\tor" ++ show sz ++ " " ++ show ad1 ++ ", " ++ show ad2 ++ "\n"
+
   show (IBcc br ad) = show br ++ " " ++ show ad ++ "\n"
+  show (IJsr ad) = "\tjsr " ++ show ad ++ "\n"
+
+  -- TODO: kod ovih stringova od varijabli i labela provjeravati da nemaju razmake!
+  show (DDs sz str i) = str ++ " " ++ "ds" ++ show sz ++ " " ++ show i ++ "\n"
+  -- show (DDc str i) = str ++ " " ++ "ds" ++ show sz ++ show i
+  show (DOrg addr) = "\torg $" ++ showHex addr "" ++ "\n"
+  show (DLabel str) = str ++ ":\n"
+  show (DEnd str) = "\tend " ++ str ++ "\n"
 
 --instance Show Instruction
-type Code = Either Instruction Directive
 data Sign = Signed | Unsigned
   deriving Eq
-data CState = CState
+data CState = CState -- compiler state - pamti stanja kompajlera kod prolaska kroz komande
   { vars :: HashMap String (Size, Sign) -- ime -> (byte|word|long, signed|unsigned)
-  , ifLabels :: [String]
-  , loopLabels :: [String]
+  , ifLabels :: [String] -- samo popis, da znam da se ne ponavljaju
+  , loopLabels :: [String] -- isto ko gore, samo popis
+  --, gen :: StdGen -- treba mi za raditi random stringove
   }
-  deriving Eq
+  --deriving Eq
+
+emptyState = CState HM.empty [] [] --newStdGen
+
+stateUnion c1 c2 =
+  c2 { vars = HM.union (vars c1) (vars c2)
+     , ifLabels = nub (ifLabels c1 ++ ifLabels c2)
+     , loopLabels = nub (loopLabels c1 ++ loopLabels c2)
+     }
 
 data Program = Program CState [Code] -- header, body
 
@@ -119,7 +141,7 @@ var_prefix = "var_" -- prefix koji se daje svim labelima koji oznacavaju varijab
 startAddress = 0x1000
 startLabel = "asdfasdf" -- TODO: rjesiti se labela, koristiti samo adrese
 initialStack = Const 0x10000
-initializationDirectives = [DOrg startAddress]
+initializationDirectives = [DOrg startAddress, DLabel startLabel]
 initializationCode = [IMove SL initialStack (AReg 7)]
 endDirectives = [DEnd startLabel]
 
@@ -155,98 +177,136 @@ data RBinOp = Greater | Less deriving (Show)
 data Branch = BCC | BCS | BPL | BMI | BNE | BEQ
 -}
 
-mapOpToCommand :: ABinOp -> Addr -> Addr -> Instruction
+mapOpToCommand :: ABinOp -> Addr -> Addr -> Code
 mapOpToCommand op = case op of
                       Add -> IAdd SB
                       Subtract -> ISub SB
                       Multiply -> IMul SW
                       Divide -> IDiv SW
 
+-- kaze na fju koja iz inta izvuce dal je jednak nuli il ne
+__builtin_int_to_bool = Label "__builtin_int_to_bool"
+
+-- kaze na fju koja radi usporedbu vrijednosti na stacku
+-- fje su TODO
+__builtin_compare_lt = Label "__builtin_compare_lt"
+__builtin_compare_gt = Label "__builtin_compare_gt"
+
+
+-- TODO: zato jer nemam tipove i jer su glupo rjeseni boolovi, ovo je ruzna ali
+-- nuzna improvizacija
+-- fja stavlja 0 ili 1 na stack, ovisno o tome kak se evaluiral izraz
+-- ovisno o tome, pozivajuca fja definira dal da skoci ili ne
+translateBexp state bexp =
+  case bexp of
+    -- prva dva su bezuvjetni skokovi
+    BoolConst True -> [IMove SB (Const 1) (ADec 7)]
+    BoolConst False -> [IMove SB (Const 0) (ADec 7)]
+    -- prvo, evaluiramo bexp2. nakon toga, uzmem to kaj je bilo na stacku i negiram
+    Not bexp2 -> translateBexp state bexp2 ++ [INeg SB (ADeref 7)] -- TODO: ovo je pitanje dal radi dobro
+    BBinary bop bexp1 bexp2 ->
+      -- bop moze biti and ili or
+      translateBexp state bexp1 ++ translateBexp state bexp2 ++
+      [ IMove SB (AInc 7) (DReg 0)
+      , IMove SB (AInc 7) (DReg 1)] ++
+      -- sad na vrhu stacka imam 0 ili 1, napravim and ili or
+      case bop of
+        And -> [IAnd SB (DReg 0) (DReg 1)]
+        Or -> [IOr SB (DReg 0) (DReg 1)]
+    RBinary rop aexp1 aexp2 ->
+      -- rop moze biti greater ili lesser
+      -- prvo, prevedem aexpove u vrijednosti
+      let (_, code1) = translateCommand state (Expr aexp1)
+          (_, code2) = translateCommand state (Expr aexp2)
+      -- code1 na stack stavlja rezultat izvrsavanja aexp1
+      -- code2 isto
+      -- nakon code1 i code2 na vrhu stacka imamo dvije vrijednosti koje treba usporediti
+      in code1 ++ code2 ++
+      [IJsr (case rop of {Greater -> __builtin_compare_gt; Less -> __builtin_compare_lt})]
+    -- nakon ovog, na stacku je 0 ili 1
+
+getNextLabel state = (state {ifLabels = label:ifLabels state}, label)
+  where len = length (ifLabels state)
+        label = "if_label_" ++ show len
 
 -- sequence == samo prevod svega najedamput (TODO je neki state
 -- monad koji zna kaj se dogadjalo prije zbog optimizacije)
-translateCommand (Seq l) = concat $ map translateCommand l
+--translateCommand state (Seq l) = concat $ map translateCommand l
+-- TODO: ovo mi se ne svidja :D (mislim da bude problema sa stackom)
+translateCommand :: CState -> Stmt -> (CState, [Code])
+translateCommand state (Seq ls) =
+  case ls of
+    [] -> (state, [])
+    (l:lss) -> let (newstate, code) = translateCommand state l
+                   (retstate, retcode) = translateCommand newstate (Seq lss)
+               in (retstate, code ++ retcode)
 
-translateCommand (If bexp s1 s2) =
-  case bexp of
-    -- BoolConst b ->
-    -- Not b ->
-    -- RBinary bbop b1 b2 ->
-    -- svakak prvo trebam izracunati rezultate a1 i a2
-    ----------------------------------------------------------------
-    -- NOTE kad je operacija binarni and ili or
-    {-BBinary bbop a1 a2 ->
-      translateCommand (Expr a1)
-      ++
-      translateCommand (Expr a2)
-      ++
-      map Left
-      [  IMove SB (AInc 7) (DReg 0)
-      ,  IMove SB (AInc 7) (DReg 1)
-      ,  ICmp SB (DReg 0) (DReg 1)
-      ,
-
-      ++ translateCommand s1
-      ++ [Left (IBcc BRA (Label "preskok_smece"))] ++  [Right (DLabel "neko_smece")]
-      ++ translateCommand s2
-      ++ [Right (DLabel "preskok_smece")]
--}
-
-    -- NOTE kad je operacija usporedba
-    ----------------------------------------------------------------
-    RBinary rbop a1 a2 ->
-      translateCommand (Expr a1)
-      ++
-      translateCommand (Expr a2)
-      -- sad na stacku imam ta dva rezultata, ovisno o naredbi trebamo branch
-      ++
-      map Left
-      [  IMove SB (AInc 7) (DReg 0)
-      ,  IMove SB (AInc 7) (DReg 1)
-      ,  ICmp SB (DReg 0) (DReg 1)
-      ,  IBcc (case rbop of {Greater -> BCS; _ -> BCC}) (Label "neko_smece")] -- uvjet je okrenut
-      ++ translateCommand s1
-      ++ [Left (IBcc BRA (Label "preskok_smece"))] ++  [Right (DLabel "neko_smece")]
-      ++ translateCommand s2
-      ++ [Right (DLabel "preskok_smece")]
-
-      -- problem: treba staviti i label nekud
-      -- rjesenje: zasad eksplicitni label... znam da je smece al jebiga :D
+translateCommand state (If bexp stm1 stm2) =
+  -- imam dva nezavisna statementa
+  let codeBexp = translateBexp state bexp
+      (state2, label) = getNextLabel state
+      (state3, code1) = translateCommand state2 stm1
+      -- TODO: rjesiti bolje, zasad, code2 stoji u memoriji nakon code1 -- to
+      -- znaci da zna za njegove labele state u biti samo pamti koji labeli su
+      -- slobodni i koje varijable su vec definirane
+      -- samo labeli su bitni u biti
+      (state4, code2) = translateCommand state3 stm2
+      in (state3, codeBexp ++
+         -- gornji kod na stack baci 0 ili 1
+         [ITst SB (AInc 7), IBcc BNE (Label label)] ++
+         code1 ++ [IBcc BRA (Label (label++"_end"))] ++
+         [DLabel label] ++
+         code2 ++
+         [DLabel (label++"_end")])
 
 -- aritmeticki izrazi -- kad zavrse, rezultat mora biti stavljen na vrh stoga
-  -- TODO: div vjerojatno ne valja tj. treba puno toga provjeriti (mozda napravi interrupt!)
-translateCommand (Expr exp) =
+  -- TODO: div vjerojatno ne valja tj. treba puno toga provjeriti (mozda napravi
+  -- interrupt!)
+translateCommand state (Expr exp) =
   case exp of
     -- ako je izraz samo varijabla, stavim njen label na vrh stoga
     -- TODO: ako varijabla ne postoji, skrsiti se ili ju inicijalizirati -- sad radim bez statea
-    Var s -> map Left [IMove SB (Label (var_prefix ++ s)) (ADec 7)]
-    IntConst i -> map Left [IMove SB (Const i) (ADec 7)]
+    Var s -> (state, [IMove SB (Label (var_prefix ++ s)) (ADec 7)])
+    IntConst i -> (state,[IMove SB (Const i) (ADec 7)])
     --Neg AExpr -> 
     -- za operaciju, e1 i e2 moram zapakirati u statement
-    ABinary op e1 e2 -> translateCommand (Expr e1) ++ translateCommand (Expr e2) ++
-      -- uzmem operande sa stoga
-      map Left
+    ABinary op e1 e2 ->
+      -- TODO: ova sintaksa MOLI za neki sequencing :D
+      let (s1, code1) = translateCommand state (Expr e1)
+          (s2, code2) = translateCommand state (Expr e2)
+      in-- uzmem operande sa stoga
+      (s2, code1 ++ code2 ++
       [ IMove SB (AInc 7) (DReg 0)
       , IMove SB (AInc 7) (DReg 1)
       -- izracunam kaj vec treba
       , mapOpToCommand op (DReg 0) (DReg 1)
       -- pomaknem rezultat na vrh stoga
-      , IMove SB (DReg 1) (ADec 7)]
+      , IMove SB (DReg 1) (ADec 7)])
 
 -- varijable == eksplicitni DS od tocno jednog bajta
 -- plus prateca naredba u inicijalizaciji
-translateCommand (Assign str aexp) =
+translateCommand state (Assign str aexp) =
+  let (s1, code1) = translateCommand state (Expr aexp)
+      -- dodam novu varijablu u state
+      s2 = s1 { vars = HM.insert var_label (SB, Unsigned) (vars s1) }
   -- TODO: ako vec nije definiran label, naravno, al pustim to programu koji sve sklapa skupa
   -- TODO: trenutno nema promjene vrijednosti varijable jedamput kad ju definiram :D
-  map Right [DDs SB (var_label) 1] -- definiram label
-  ++
-  translateCommand (Expr aexp)
-  ++
   -- nakon evaluacije aexp-a, rezultat je na vrhu stoga
-  map Left [IMove SB (AInc 7) (Label var_label)]
+  in (s2, code1 ++ [IMove SB (AInc 7) (Label var_label)])
   where var_label = var_prefix ++ str
 
-translate statement =
+--translate st = []
+getVarsFromState state =
+  -- TODO: i nomenklatura za state je uzasna :D
+  map (\x -> DDs SB x 1) $ HM.keys (vars state)
+
+translate stmt =
+  let (state, code) = translateCommand emptyState stmt
+      -- na pocetak koda trebam staviti sve varijable
+      varLabels = getVarsFromState state
+  in concat $ map show $ varLabels ++ initializationDirectives ++ initializationCode ++ code ++ endDirectives
+
+{-translate statement =
   let (cmds, dirs') = partitionEithers (translateCommand statement)
       dirs = nub dirs' -- nema smisla imati dvije iste direktive
       -- sve direktive hocu smjestiti na pocetak
@@ -254,6 +314,7 @@ translate statement =
       end = map Right endDirectives
       prog = init ++ map Left cmds ++ end
   in putStr $ concat $ map (either show show) prog
+-}
 
 -- varijable -- najlakse je napraviti memoriju za svaku varijablu (ko label)
     -- nije prosirivo -- kaj ako imamo lokalne varijable?
