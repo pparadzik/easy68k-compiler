@@ -213,6 +213,7 @@ translateBexp state bexp =
       case bop of
         And -> [IAnd SB (DReg 0) (DReg 1)]
         Or -> [IOr SB (DReg 0) (DReg 1)]
+      ++ [IMove SB (DReg 1) (ADec 7)] -- stavimo rezultat na stack
     RBinary rop aexp1 aexp2 ->
       -- rop moze biti greater ili lesser
       -- prvo, prevedem aexpove u vrijednosti
